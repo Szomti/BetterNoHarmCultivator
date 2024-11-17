@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 using BepInEx;
@@ -9,38 +8,82 @@ using HarmonyLib;
 using IAmFuture.Data.Enemies;
 using IAmFuture.Gameplay.Buildings;
 using IAmFuture.Gameplay.Electricity;
-using IAmFuture.Gameplay.Enemies.Nests;
 using IAmFuture.Gameplay.HealthSystems;
-using IAmFuture.Gameplay.TimeSystems;
 
 namespace BetterNoHarmCultivator;
 
-[BepInPlugin(MyPluginInfo.PLUGIN_GUID, MyPluginInfo.PLUGIN_NAME, MyPluginInfo.PLUGIN_VERSION)]
+[BepInPlugin(PluginInfo.PluginGuid, PluginInfo.PluginName, PluginInfo.PluginVersion)]
 [BepInProcess("I Am Future.exe")]
 public class Plugin : BaseUnityPlugin
 {
+    private ConfigEntry<bool> _blockDamage;
     private ConfigEntry<bool> _requireElectricity;
+    private ConfigEntry<bool> _useCustomElectricityUsage;
+    private ConfigEntry<float> _electricityUsage;
 
-    private void Awake()
+    private void LoadConfigs()
     {
+        _blockDamage = Config.Bind("Damage",
+            "blockDamage",
+            true,
+            "Block damage to cultivator");
+
         _requireElectricity = Config.Bind("Electricity",
             "requireElectricity",
             true,
-            "If cultivator needs electricity to work");
-        
-        var harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
-        harmony.PatchAll(typeof(BlockDamage));
+            "If cultivator needs electricity to work (will still use electricity if connected)");
+
+        _useCustomElectricityUsage = Config.Bind("Electricity Usage",
+            "useCustomElectricityUsage",
+            false,
+            "If the cultivator should use custom amount of electricity");
+
+        _electricityUsage = Config.Bind("Electricity Usage",
+            "electricityUsage",
+            0f,
+            "Cultivator\'s electricity usage");
+    }
+
+    private void Awake()
+    {
+        LoadConfigs();
+        var harmony = new Harmony(PluginInfo.PluginGuid);
+
+        if (_blockDamage.Value)
+        {
+            harmony.PatchAll(typeof(BlockDamage));
+        }
+
         if (!_requireElectricity.Value)
         {
             harmony.PatchAll(typeof(NoElectricityRequired));
         }
 
-        Logger.LogInfo($"Plugin {MyPluginInfo.PLUGIN_GUID} is loaded!");
+        if (_useCustomElectricityUsage.Value)
+        {
+            CustomElectricityUsage.ElectricityUsage = _electricityUsage.Value;
+            harmony.PatchAll(typeof(CustomElectricityUsage));
+        }
+
+        Logger.LogInfo($"Plugin {PluginInfo.PluginGuid} is loaded!");
     }
 
     [HarmonyPatch(typeof(EnemyNestCultivatorBuilding))]
-    internal class NoElectricityRequired
+    internal class CustomElectricityUsage
     {
+        public static float ElectricityUsage;
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(EnemyNestCultivatorBuilding), "UpdateElectricityConsumption")]
+        private static void Prefix(ref EnemyNestCultivatorBuilding __instance)
+        {
+            var electricityConsumerField =
+                AccessTools.Field(typeof(EnemyNestCultivatorBuilding), "electricityConsumer");
+            var electricityConsumer = (ElectricityConsumer)electricityConsumerField.GetValue(__instance);
+            electricityConsumer.ConsumeAmount = Math.Abs(ElectricityUsage);
+            electricityConsumerField.SetValue(__instance, electricityConsumer);
+        }
+
         [HarmonyTranspiler]
         [HarmonyPatch(typeof(EnemyNestCultivatorBuilding), "UpdateElectricityConsumption")]
         private static IEnumerable<CodeInstruction> ClearUpdateElectricityConsumptionTranspiler(
@@ -51,7 +94,11 @@ public class Plugin : BaseUnityPlugin
                 new(OpCodes.Ret)
             };
         }
+    }
 
+    [HarmonyPatch(typeof(EnemyNestCultivatorBuilding))]
+    internal class NoElectricityRequired
+    {
         [HarmonyTranspiler]
         [HarmonyPatch(typeof(EnemyNestCultivatorBuilding), "UpdateEnemyNestBlocking")]
         private static IEnumerable<CodeInstruction> EditUpdateEnemyNestBlockingTranspiler(
@@ -80,6 +127,7 @@ public class Plugin : BaseUnityPlugin
     [HarmonyPatch(typeof(EnemyNestCultivatorBuilding))]
     internal class BlockDamage
     {
+        [HarmonyPrefix]
         [HarmonyPatch(typeof(EnemyNestCultivatorBuilding), "ResolveEnemySpawnSuccessfullyBlocked")]
         private static void Prefix(ref EnemyNestCultivatorBuilding __instance, EnemyEntity enemy)
         {
@@ -89,6 +137,11 @@ public class Plugin : BaseUnityPlugin
             {
                 AccessTools.Field(typeof(EnemyNestCultivatorBuilding), "damageReceivedWhenBlockingEnemy")
                     .SetValue(__instance, 0);
+            }
+            else
+            {
+                AccessTools.Field(typeof(EnemyNestCultivatorBuilding), "damageReceivedWhenBlockingEnemy")
+                    .SetValue(__instance, 1);
             }
         }
     }
